@@ -35,6 +35,13 @@ enum SampleType {
     SAMPLE_TYPE_FLOAT32
 };
 
+const size_t SAMPLE_TYPE_SIZE[] {
+    sizeof(int8_t)*2,
+    sizeof(int16_t)*2,
+    sizeof(int32_t)*2,
+    sizeof(float)*2,
+};
+
 class NetworkSourceModule : public ModuleManager::Instance {
 public:
     NetworkSourceModule(std::string name) {
@@ -237,52 +244,47 @@ private:
     }
 
     void worker() {
-        int frameSize = samplerate / 200;
-        switch (sampType) {
-        case SAMPLE_TYPE_INT8:
-            frameSize *= 2*sizeof(int8_t);;
-            break;
-        case SAMPLE_TYPE_INT16:
-            frameSize *= 2*sizeof(int16_t);
-            break;
-        case SAMPLE_TYPE_INT32:
-            frameSize *= 2*sizeof(int32_t);
-            break;
-        case SAMPLE_TYPE_FLOAT32:
-            frameSize *= sizeof(dsp::complex_t);
-            break;
-        default:
-            return;
-        }
-        uint8_t* buffer = dsp::buffer::alloc<uint8_t>(STREAM_BUFFER_SIZE*sizeof(uint32_t));
+        // Compute sizes
+        int blockSize = samplerate / 200;
+        int sampleSize = SAMPLE_TYPE_SIZE[sampType];
+        int frameSize = blockSize*sampleSize;
+
+        // Allocate receive buffer
+        uint8_t* buffer = dsp::buffer::alloc<uint8_t>(frameSize);
 
         while (true) {
             // Read samples from socket
-            int bytes = sock->recv(buffer, frameSize, true);
+            int bytes;
+            {
+                std::lock_guard lck(sockMtx);
+                bytes = sock->recv(buffer, frameSize, true);
+                if (bytes <= 0) { break; }
+            }
 
-            // Convert to CF32
-            int count;
+            // Convert to CF32 (note: problem if partial sample)
+            int count = bytes / sampleSize;
             switch (sampType) {
             case SAMPLE_TYPE_INT8:
-                frameSize *= 2*sizeof(int8_t);;
+                volk_8i_s32f_convert_32f((float*)stream.writeBuf, (int8_t*)buffer, 128.0f, count*2);
                 break;
             case SAMPLE_TYPE_INT16:
-                frameSize *= 2*sizeof(int16_t);
+                volk_16i_s32f_convert_32f((float*)stream.writeBuf, (int16_t*)buffer, 32768.0f, count*2);
                 break;
             case SAMPLE_TYPE_INT32:
-                frameSize *= 2*sizeof(int32_t);
+                volk_32i_s32f_convert_32f((float*)stream.writeBuf, (int32_t*)buffer, 2147483647.0f, count*2);
                 break;
             case SAMPLE_TYPE_FLOAT32:
-                //memcpy(stream.writeBuf, buffer, )
+                memcpy(stream.writeBuf, buffer, bytes);
                 break;
             default:
                 break;
             }
 
             // Send out converted samples
-            //if (!stream.swap(bufferSize))
+            if (!stream.swap(count)) { break; }
         }
 
+        // Free receive buffer
         dsp::buffer::free(buffer);
     }
 
